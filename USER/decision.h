@@ -7,8 +7,8 @@
  *
  * 全局变量：
  *   g_sys_state        当前状态
- *   g_board[3][3]      逻辑棋盘（机器维护的"应该是什么"）
- *   g_board_vision[3][3] 视觉棋盘（OpenMV 传来，队友填充）
+ *   g_board[3][3]      逻辑棋盘
+ *   g_board_vision[3][3] 视觉棋盘（队友填充）
  *   g_new_human_move   人的新落子位置（1~9），0 表示无
  *   g_human_first      1=人先手（默认），0=机器先手
  */
@@ -60,22 +60,28 @@ void Decision_Init(void);
 
 /**
  * @brief  决策主循环（在 main 的 while(1) 中循环调用）
+ *
+ * 内部状态机自动推进：
+ *   SELECT → 等待按键/串口选择先后手 → 超时默认人先手
+ *   WAIT_HUMAN → 等待人落子 → 检查胜负
+ *   CALCULATE → AI 计算最优位置
+ *   DO_MOVE → 执行机械臂动作 → 回到 WAIT_HUMAN 或 GAME_OVER
+ *   GAME_OVER → 等待重置
+ *   RESTORE → 恢复被篡改的棋盘
  */
 void Decision_Update(void);
 
 /**
- * @brief  供调试/通信层调用：注入人的落子位置
+ * @brief  注入人的落子位置
  * @param  pos  1~9
+ *
+ * 供队友在视觉回调中调用，或供测试代码直接注入。
  */
 void Logic_SetHumanMove(uint8_t pos);
 
 /**
  * @brief  供视觉层调用：更新视觉识别到的棋盘
  * @param  board  3x3 棋盘数组
- *
- * 队友在 OpenMV 通信回调中调用此函数。
- * 决策系统会在 WAIT_HUMAN 状态中自动比较
- * g_board 和 g_board_vision 检测篡改。
  */
 void Logic_UpdateVisionBoard(ChessSpace_t board[3][3]);
 
@@ -88,5 +94,18 @@ ChessSpace_t Logic_GetMachineColor(void);
  * @brief  获取人方颜色
  */
 ChessSpace_t Logic_GetHumanColor(void);
+
+/**
+ * @brief  检查指定位置是否被占用
+ * @param  pos  1~9
+ * @return 1 = 被占用，0 = 空位
+ */
+uint8_t Logic_IsOccupied(uint8_t pos);
+
+/**
+ * @brief  检查游戏是否结束
+ * @return 0=进行中, 1=人赢, 2=机器赢, 3=平局
+ */
+uint8_t Logic_GetGameResult(void);
 
 #endif /* DECISION_H */

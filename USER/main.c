@@ -1,29 +1,21 @@
 /**
  * @file    main.c
- * @brief   WeArm 三子棋 v2 —— 调试模式主程序
+ * @brief   WeArm 三子棋 TEST 版本 —— 硬件功能自动测试
  *
- * 本版本为调试/开发版本，通过 PC 串口助手交互：
- *   - 发送 1~9 落子
- *   - 发送 M/H 选择先后手
- *   - 发送 G/P/X 手动测试机械臂动作
- *   - 发送 R 重置、B 查看棋盘、? 帮助
+ * 本版本不依赖串口调试，上电后自动执行以下测试序列：
+ *   测试 1：机械臂归中 + 安全位
+ *   测试 2：逆运动学解算 + 移动到 3 个不同坐标
+ *   测试 3：电磁铁 ON/OFF
+ *   测试 4：完整落子动作（do_move / place / remove）
+ *   测试 5：AI 决策 + 完整对弈演示
  *
- * OpenMV 通信接口已预留（comm_layer.h 中 Vision_xxx 函数），
- * 队友在对应 TODO 位置补充实现即可。
+ * 每个测试之间有 1 秒间隔，方便观察。
+ * 测试通过后进入主循环：Decision_Update() 持续运行。
+ * 之后队友接入 OpenMV 后，状态机会自动与视觉配合。
  *
- * 启动流程：
- *   1. arm_ctrl_init()    硬件初始化（时钟/GPIO/TIM3/TIM4/TIM2/USART1）
- *   2. __enable_irq()     开总中断
- *   3. arm_magnet_init()  电磁铁
- *   4. arm_key_init()     按键
- *   5. arm_chess_init()   棋盘坐标
- *   6. Comm_Init()        串口调试协议
- *   7. 机械臂归中
- *   8. Decision_Init()    决策系统
- *
- * 主循环：
- *   - 轮询 USART1 收到的字符 → Comm_ParseChar()
- *   - Decision_Update()    状态机推进
+ * ============================================================
+ *  测试开关（注释掉不需要的测试）
+ * ============================================================
  */
 
 #include "stm32f10x.h"
@@ -31,51 +23,209 @@
 #include "arm_magnet.h"
 #include "arm_key.h"
 #include "arm_chess.h"
-#include "arm_usart.h"
 #include "arm_delay.h"
-#include "comm_layer.h"
 #include "decision.h"
+#include "vision_interface.h"
 
+/* ---- 测试开关：设为 0 跳过对应测试 ---- */
+#define TEST_MOVE_IK        1   /* 测试 1：归中 + 逆运动学 */
+#define TEST_MAGNET         1   /* 测试 2：电磁铁 */
+#define TEST_CHESS_ACTIONS  1   /* 测试 3：落子/放子/移除 */
+#define TEST_AI_GAME        1   /* 测试 4：AI 完整对弈 */
+
+/* ---- 测试间隔（毫秒） ---- */
+#define TEST_GAP_MS  1000
+
+/* ================================================================== */
+/*  内部辅助：测试间等待                                                 */
+/* ================================================================== */
+static void test_gap(void)
+{
+    arm_delay_ms(TEST_GAP_MS);
+}
+
+/* ================================================================== */
+/*  测试 1：机械臂归中 + 逆运动学 + 安全位                               */
+/* ================================================================== */
+static void test_move_and_ik(void)
+{
+    /* 1a. 归中 */
+    arm_ctrl_reset(2000);
+    arm_ctrl_wait_done(3000);
+    test_gap();
+
+    /* 1b. 安全位 */
+    arm_chess_to_safe();
+    test_gap();
+
+    /* 1c. 逆运动学：移动到 3 个不同坐标，验证解算和舵机联动 */
+    arm_ctrl_move_xyz(0.0f,  200.0f, 100.0f, 1500);
+    arm_ctrl_wait_done(3000);
+    test_gap();
+
+    arm_ctrl_move_xyz(100.0f, 150.0f, 80.0f,  1500);
+    arm_ctrl_wait_done(3000);
+    test_gap();
+
+    arm_ctrl_move_xyz(-80.0f, 180.0f, 120.0f, 1500);
+    arm_ctrl_wait_done(3000);
+    test_gap();
+
+    /* 回安全位 */
+    arm_chess_to_safe();
+    test_gap();
+}
+
+/* ================================================================== */
+/*  测试 2：电磁铁 ON/OFF（咔嗒声确认）                                  */
+/* ================================================================== */
+static void test_magnet(void)
+{
+    arm_magnet_on();
+    arm_delay_ms(500);
+    arm_magnet_off();
+    arm_delay_ms(500);
+
+    /* 再来一次确认 */
+    arm_magnet_on();
+    arm_delay_ms(500);
+    arm_magnet_off();
+    arm_delay_ms(500);
+}
+
+/* ================================================================== */
+/*  测试 3：落子 / 放子 / 移除 动作                                     */
+/* ================================================================== */
+static void test_chess_actions(void)
+{
+    /* 3a. 完整落子到 5 号位（中心） */
+    arm_chess_do_move(5);
+    test_gap();
+
+    /* 3b. 完整落子到 1 号位（左上角） */
+    arm_chess_do_move(1);
+    test_gap();
+
+    /* 3c. 从 5 号位移除棋子 */
+    arm_chess_remove(5);
+    test_gap();
+
+    /* 3d. 补放到 5 号位 */
+    arm_chess_place(5);
+    test_gap();
+
+    /* 回安全位 */
+    arm_chess_to_safe();
+    test_gap();
+}
+
+/* ================================================================== */
+/*  测试 4：AI 决策完整对弈演示                                          */
+/*  模拟人先手，机器自动回应，下完一盘自动重置                            */
+/* ================================================================== */
+static void test_ai_game(void)
+{
+    /* ---- 所有声明放在块顶部（ARMCC C89 要求） ---- */
+    static const uint8_t human_moves[] = {1, 2, 3, 6, 9};
+    static const uint8_t num_moves = sizeof(human_moves);
+    uint8_t  step;
+    uint16_t timeout;
+    uint16_t timeout2;
+
+    /* 人先手 */
+    g_human_first = 1;
+
+    step = 0;
+
+    while (step < num_moves) {
+        /* 注入人的落子 */
+        Logic_SetHumanMove(human_moves[step]);
+        step++;
+
+        /* 推进状态机直到回到 WAIT_HUMAN 或 GAME_OVER */
+        timeout = 0;
+        while (g_sys_state != SYS_STATE_WAIT_HUMAN &&
+               g_sys_state != SYS_STATE_GAME_OVER &&
+               timeout < 500) {
+            Decision_Update();
+            timeout++;
+        }
+
+        if (g_sys_state == SYS_STATE_GAME_OVER) {
+            break;
+        }
+
+        test_gap();
+    }
+
+    /* 如果没结束，把剩余步骤跑完 */
+    timeout2 = 0;
+    while (g_sys_state != SYS_STATE_GAME_OVER && timeout2 < 500) {
+        Decision_Update();
+        timeout2++;
+    }
+
+    test_gap();
+
+    /* 重置 */
+    Decision_Init();
+    test_gap();
+}
+
+/* ================================================================== */
+/*  主函数                                                              */
+/* ================================================================== */
 int main(void)
 {
-    /* ---- 1. 硬件初始化（包含 GPIO/TIM/USART1） ---- */
+    /* ---- 1. 硬件初始化 ---- */
     arm_ctrl_init();
 
-    /* ---- 2. 开总中断 ---- */
+    /* ---- 2. 开总中断（TIM2 缓动需要） ---- */
     __enable_irq();
 
     /* ---- 3. 外设初始化 ---- */
     arm_magnet_init();
     arm_key_init();
     arm_chess_init();
-    Comm_Init();
 
     /* ---- 4. 上电归中 ---- */
     arm_ctrl_reset(2000);
     arm_ctrl_wait_done(3000);
     arm_delay_ms(500);
 
-    /* ---- 5. 初始位置：安全待机 ---- */
+    /* ---- 5. 安全位 ---- */
     arm_chess_to_safe();
     arm_ctrl_wait_done(3000);
 
-    /* ---- 6. 决策系统初始化 ---- */
-    Decision_Init();
+    /* ================================================================
+     *  自动测试序列
+     *  每个测试之间有 1 秒间隔
+     * ================================================================ */
+
+#if TEST_MOVE_IK
+    test_move_and_ik();
+#endif
+
+#if TEST_MAGNET
+    test_magnet();
+#endif
+
+#if TEST_CHESS_ACTIONS
+    test_chess_actions();
+#endif
+
+#if TEST_AI_GAME
+    test_ai_game();
+#endif
 
     /* ================================================================
-     *  主循环：串口轮询 + 决策状态机
+     *  测试完成 → 进入正常运行主循环
+     *  队友接入 OpenMV 后，Decision_Update() 会自动与视觉配合
      * ================================================================ */
+    Decision_Init();
+
     while (1)
     {
-        /* ---- 串口接收：逐字符轮询 ---- */
-        {
-            uint16_t data = arm_usart1_getchar();
-            if (data != 0) {
-                Comm_ParseChar((uint8_t)data);
-            }
-        }
-
-        /* ---- 决策系统状态机 ---- */
         Decision_Update();
     }
 }

@@ -1,6 +1,6 @@
 /**
  * @file    arm_chess.c
- * @brief   三子棋机械臂动作实现
+ * @brief   三子棋机械臂动作实现（纯驱动，无串口依赖）
  *
  * 动作参数说明：
  *   z_safe  —— 悬停高度，下降前先到这个高度
@@ -12,8 +12,7 @@
 #include "arm_config.h"
 #include "arm_ctrl.h"
 #include "arm_magnet.h"
-#include "arm_usart.h"
-#include <stdio.h>
+#include "arm_delay.h"
 
 /* ================================================================== */
 /*  内部：棋盘坐标表 [pos 0~9]，0 号位不使用                             */
@@ -26,20 +25,12 @@ typedef struct {
 static BoardPoint_t s_grid[10];
 
 /* ================================================================== */
-/*  内部：单轴/三轴移动 + 等待到位的封装                                 */
+/*  内部：移动到指定坐标并阻塞等待到位                                   */
 /* ================================================================== */
-
-/**
- * @brief  移动到 (x, y, z) 并阻塞等待到位
- */
 static void _move_and_wait(float x, float y, float z, uint32_t time_ms)
 {
-    char dbg[80];
     arm_ctrl_move_xyz(x, y, z, time_ms);
     arm_ctrl_wait_done(time_ms + 2000);
-    snprintf(dbg, sizeof(dbg),
-             "[CH] moved to (%.1f, %.1f, %.1f)\r\n", x, y, z);
-    arm_usart1_print(dbg);
 }
 
 /* ================================================================== */
@@ -58,21 +49,15 @@ void arm_chess_init(void)
     s_grid[7].x = GRID_P7_X; s_grid[7].y = GRID_P7_Y;
     s_grid[8].x = GRID_P8_X; s_grid[8].y = GRID_P8_Y;
     s_grid[9].x = GRID_P9_X; s_grid[9].y = GRID_P9_Y;
-
-    arm_usart1_print("[CH] board coordinates loaded\r\n");
 }
 
 /* ================================================================== */
 /*  完整落子流程（机器正常落子）                                          */
+/*  流程：备用位取子 → 移到目标格 → 放子 → 回安全位                      */
 /* ================================================================== */
 void arm_chess_do_move(uint8_t pos)
 {
-    char msg[48];
-
     if (pos < 1 || pos > 9) return;
-
-    snprintf(msg, sizeof(msg), "[CH] do_move -> pos %d\r\n", pos);
-    arm_usart1_print(msg);
 
     /* ---- 步骤 1：从备用棋位置取子 ---- */
 
@@ -106,8 +91,6 @@ void arm_chess_do_move(uint8_t pos)
 
     /* ---- 步骤 3：回到安全位置 ---- */
     arm_chess_to_safe();
-
-    arm_usart1_print("[CH] do_move done\r\n");
 }
 
 /* ================================================================== */
@@ -115,12 +98,7 @@ void arm_chess_do_move(uint8_t pos)
 /* ================================================================== */
 void arm_chess_place(uint8_t pos)
 {
-    char msg[48];
-
     if (pos < 1 || pos > 9) return;
-
-    snprintf(msg, sizeof(msg), "[CH] place -> pos %d\r\n", pos);
-    arm_usart1_print(msg);
 
     /* 取子 */
     _move_and_wait(STOCK_X, STOCK_Y, BOARD_Z_SAFE, 1000);
@@ -137,7 +115,6 @@ void arm_chess_place(uint8_t pos)
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 800);
 
     arm_chess_to_safe();
-    arm_usart1_print("[CH] place done\r\n");
 }
 
 /* ================================================================== */
@@ -145,12 +122,7 @@ void arm_chess_place(uint8_t pos)
 /* ================================================================== */
 void arm_chess_remove(uint8_t pos)
 {
-    char msg[48];
-
     if (pos < 1 || pos > 9) return;
-
-    snprintf(msg, sizeof(msg), "[CH] remove -> pos %d\r\n", pos);
-    arm_usart1_print(msg);
 
     /* 移到目标格上方 */
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
@@ -163,7 +135,7 @@ void arm_chess_remove(uint8_t pos)
     /* 抬起 */
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 800);
 
-    /* 移到丢弃区域（备用棋位置旁边即可） */
+    /* 移到丢弃区域 */
     _move_and_wait(STOCK_X, STOCK_Y - 30.0f, BOARD_Z_SAFE, 1000);
     _move_and_wait(STOCK_X, STOCK_Y - 30.0f, BOARD_Z_DOWN, 800);
     arm_magnet_off();
@@ -171,7 +143,6 @@ void arm_chess_remove(uint8_t pos)
     _move_and_wait(STOCK_X, STOCK_Y - 30.0f, BOARD_Z_SAFE, 800);
 
     arm_chess_to_safe();
-    arm_usart1_print("[CH] remove done\r\n");
 }
 
 /* ================================================================== */

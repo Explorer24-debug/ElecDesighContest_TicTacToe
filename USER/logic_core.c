@@ -1,6 +1,6 @@
 /**
  * @file    logic_core.c
- * @brief   三子棋 AI 决策核心
+ * @brief   三子棋 AI 决策核心（纯逻辑，无串口依赖）
  *
  * 策略（保证不输的经典井字棋算法）：
  *   1. 能赢 → 下这里
@@ -9,9 +9,7 @@
  *   4. 占角落（1,3,7,9）
  *   5. 占边（2,4,6,8）
  *
- * 调试模式：
- *   通过串口助手交互，不依赖 OpenMV。
- *   视觉通信接口已预留（Vision_xxx），队友后续补充。
+ * 视觉通信接口已预留（Vision_xxx），队友后续补充。
  */
 
 #include "decision.h"
@@ -19,11 +17,8 @@
 #include "arm_ctrl.h"
 #include "arm_delay.h"
 #include "arm_magnet.h"
-#include "arm_usart.h"
-#include "comm_layer.h"
 #include "arm_key.h"
-#include <stdio.h>
-#include <string.h>
+#include "vision_interface.h"
 
 /* ================================================================== */
 /*  全局变量定义                                                        */
@@ -39,9 +34,8 @@ uint8_t         g_human_first        = 1;
 /* ================================================================== */
 static ChessSpace_t s_human_color;
 static ChessSpace_t s_machine_color;
-static uint8_t      s_best_move     = 0;   /* 机器本次落子位置 1~9 */
-static uint16_t     s_select_timer  = 0;   /* 先后手选择倒计时 x100ms */
-static char         s_msg[64];             /* 调试消息缓冲区 */
+static uint8_t      s_best_move     = 0;
+static uint16_t     s_select_timer  = 0;
 
 /* ================================================================== */
 /*  内部辅助：应用颜色分配                                              */
@@ -176,7 +170,7 @@ static int Logic_GetBestMove(void)
         }
     }
 
-    return 0; /* 棋盘满了 */
+    return 0;
 }
 
 /* ================================================================== */
@@ -188,25 +182,6 @@ static void Logic_UpdateBoard(uint8_t pos, ChessSpace_t player)
     if (pos < 1 || pos > 9) return;
     PosToIndex(pos, &r, &c);
     g_board[r][c] = player;
-}
-
-/* ================================================================== */
-/*  内部辅助：打印棋盘                                                  */
-/* ================================================================== */
-static void PrintBoard(void)
-{
-    uint8_t i;
-    static const char *sym[] = {". ", "O ", "X "};
-    arm_usart1_print("\r\n  1 2 3\r\n");
-    for (i = 0; i < 3; i++) {
-        char line[32];
-        sprintf(line, "%d %s%s%s\r\n", i + 1,
-                sym[g_board[i][0]],
-                sym[g_board[i][1]],
-                sym[g_board[i][2]]);
-        arm_usart1_print(line);
-    }
-    arm_usart1_print("\r\n");
 }
 
 /* ================================================================== */
@@ -227,9 +202,6 @@ void Decision_Init(void)
     s_select_timer    = 0;
 
     g_sys_state = SYS_STATE_SELECT;
-
-    arm_usart1_print("[AI] init done\r\n");
-    arm_usart1_print("[AI] send 'M'=machine first, 'H'=human first, or wait 3s\r\n");
 }
 
 /* ================================================================== */
@@ -239,8 +211,6 @@ void Logic_SetHumanMove(uint8_t pos)
 {
     if (pos >= 1 && pos <= 9) {
         g_new_human_move = pos;
-        sprintf(s_msg, "[AI] human move %d\r\n", pos);
-        arm_usart1_print(s_msg);
     }
 }
 
@@ -253,11 +223,29 @@ void Logic_UpdateVisionBoard(ChessSpace_t board[3][3])
     for (i = 0; i < 3; i++)
         for (j = 0; j < 3; j++)
             g_board_vision[i][j] = board[i][j];
-    arm_usart1_print("[AI] vision board updated\r\n");
 }
 
 ChessSpace_t Logic_GetMachineColor(void) { return s_machine_color; }
 ChessSpace_t Logic_GetHumanColor(void)   { return s_human_color; }
+
+/* ================================================================== */
+/*  公共接口：辅助查询                                                  */
+/* ================================================================== */
+uint8_t Logic_IsOccupied(uint8_t pos)
+{
+    uint8_t r, c;
+    if (pos < 1 || pos > 9) return 1;
+    PosToIndex(pos, &r, &c);
+    return (g_board[r][c] != SPACE_EMPTY) ? 1 : 0;
+}
+
+uint8_t Logic_GetGameResult(void)
+{
+    if (CheckWin(s_human_color))   return 1;
+    if (CheckWin(s_machine_color)) return 2;
+    if (CheckDraw())               return 3;
+    return 0;
+}
 
 /* ================================================================== */
 /*  决策主循环                                                          */
@@ -277,32 +265,26 @@ void Decision_Update(void)
     /* ---- 先后手选择 ---- */
     case SYS_STATE_SELECT:
 
-        /* 按键也可以选择 */
+        /* 按键选择：KEY1 = 机器先手 */
         if (arm_key1_pressed()) {
             g_human_first = 0;
             _apply_colors();
-            arm_usart1_print("[AI] KEY1 -> MACHINE first\r\n");
             s_select_timer = 0;
             g_sys_state = SYS_STATE_CALCULATE;
             break;
         }
 
-        /* 串口命令 'M'/'H' 直接改 g_human_first 并触发（在 comm_layer 中处理） */
+        /* 外部（测试代码或视觉回调）设置了先后手 */
         if (g_human_first == 0) {
-            /* 串口选了机器先手 */
             _apply_colors();
-            arm_usart1_print("[AI] MACHINE first (from serial)\r\n");
             s_select_timer = 0;
             g_sys_state = SYS_STATE_CALCULATE;
             break;
         }
         if (g_human_first == 1 && s_select_timer > 0) {
-            /* 串口选了人先手 */
             _apply_colors();
-            arm_usart1_print("[AI] HUMAN first (from serial)\r\n");
             s_select_timer = 0;
             g_sys_state = SYS_STATE_WAIT_HUMAN;
-            PrintBoard();
             break;
         }
 
@@ -312,10 +294,8 @@ void Decision_Update(void)
         if (s_select_timer >= 30) {  /* 3 秒 */
             g_human_first = 1;
             _apply_colors();
-            arm_usart1_print("[AI] timeout -> HUMAN first\r\n");
             s_select_timer = 0;
             g_sys_state = SYS_STATE_WAIT_HUMAN;
-            PrintBoard();
         }
         break;
 
@@ -323,55 +303,42 @@ void Decision_Update(void)
     case SYS_STATE_WAIT_HUMAN:
 
         /*
-         * TODO(队友): 在此处请求视觉拍照，检查棋盘一致性。
-         * 调试模式下跳过视觉检测，直接等人下。
-         * 接入 OpenMV 后，取消注释以下代码：
-         *
+         * TODO(队友): 接入 OpenMV 后在此请求视觉拍照
          * Vision_NotifyCapture();
-         * arm_delay_ms(2000);  // 等待视觉返回
+         * arm_delay_ms(2000);
          * if (!CheckBoardConsistent()) {
-         *     arm_usart1_print("[AI] cheating detected! restoring...\r\n");
          *     g_sys_state = SYS_STATE_RESTORE;
          *     break;
          * }
          */
 
-        /* 检测篡改（调试用：KEY2 模拟） */
+        /* 防篡改测试：KEY2 模拟篡改 */
         if (arm_key2_pressed()) {
-            arm_usart1_print("[AI] CHEAT SIM: clearing center\r\n");
             g_board_vision[1][1] = SPACE_EMPTY;
             if (!CheckBoardConsistent()) {
-                arm_usart1_print("[AI] inconsistency detected!\r\n");
                 g_sys_state = SYS_STATE_RESTORE;
                 break;
             }
         }
 
-        /* 等待人落子 */
+        /* 等待人落子（通过 Logic_SetHumanMove 或 Vision_OnHumanMove 注入） */
         if (g_new_human_move != 0) {
             PosToIndex(g_new_human_move, &r, &c);
 
             if (g_board[r][c] != SPACE_EMPTY) {
-                arm_usart1_print("[AI] occupied! try another\r\n");
                 g_new_human_move = 0;
                 break;
             }
 
             Logic_UpdateBoard(g_new_human_move, s_human_color);
-            sprintf(s_msg, "[AI] human -> pos %d\r\n", g_new_human_move);
-            arm_usart1_print(s_msg);
             g_new_human_move = 0;
 
             /* TODO(队友): 通知视觉"人的动作完成" */
             Vision_NotifyActionDone();
 
-            PrintBoard();
-
             if (CheckWin(s_human_color)) {
-                arm_usart1_print("[AI] *** HUMAN WINS ***\r\n");
                 g_sys_state = SYS_STATE_GAME_OVER;
             } else if (CheckDraw()) {
-                arm_usart1_print("[AI] *** DRAW ***\r\n");
                 g_sys_state = SYS_STATE_GAME_OVER;
             } else {
                 g_sys_state = SYS_STATE_CALCULATE;
@@ -381,38 +348,28 @@ void Decision_Update(void)
 
     /* ---- 机器计算 ---- */
     case SYS_STATE_CALCULATE:
-        arm_usart1_print("[AI] thinking...\r\n");
-
         best = Logic_GetBestMove();
         if (best == 0) {
-            arm_usart1_print("[AI] *** DRAW ***\r\n");
             g_sys_state = SYS_STATE_GAME_OVER;
             break;
         }
 
         s_best_move = (uint8_t)best;
         Logic_UpdateBoard(s_best_move, s_machine_color);
-        sprintf(s_msg, "[AI] machine -> pos %d\r\n", s_best_move);
-        arm_usart1_print(s_msg);
 
         g_sys_state = SYS_STATE_DO_MOVE;
         break;
 
     /* ---- 执行落子动作 ---- */
     case SYS_STATE_DO_MOVE:
-        arm_usart1_print("[AI] executing move...\r\n");
         arm_chess_do_move(s_best_move);
 
         /* TODO(队友): 通知视觉"机器动作完成" */
         Vision_NotifyActionDone();
 
-        PrintBoard();
-
         if (CheckWin(s_machine_color)) {
-            arm_usart1_print("[AI] *** MACHINE WINS ***\r\n");
             g_sys_state = SYS_STATE_GAME_OVER;
         } else if (CheckDraw()) {
-            arm_usart1_print("[AI] *** DRAW ***\r\n");
             g_sys_state = SYS_STATE_GAME_OVER;
         } else {
             g_sys_state = SYS_STATE_WAIT_HUMAN;
@@ -422,28 +379,22 @@ void Decision_Update(void)
     /* ---- 恢复被篡改的棋盘 ---- */
     case SYS_STATE_RESTORE: {
         uint8_t done = 1;
-        uint8_t pi, pj;
+        uint8_t pi, pj, pos;
 
         for (pi = 0; pi < 3; pi++) {
             for (pj = 0; pj < 3; pj++) {
                 if (g_board_vision[pi][pj] != g_board[pi][pj]) {
-                    uint8_t pos = IndexToPos(pi, pj);
+                    pos = IndexToPos(pi, pj);
 
                     if (g_board_vision[pi][pj] != SPACE_EMPTY &&
                         g_board[pi][pj] == SPACE_EMPTY) {
-                        /* 视觉有棋但逻辑没有 → 拿走 */
-                        sprintf(s_msg, "[AI] restore: remove %d\r\n", pos);
-                        arm_usart1_print(s_msg);
-                        arm_chess_remove(pos);
+                        arm_chess_place(pos);
                         done = 0;
                         break;
                     }
                     if (g_board_vision[pi][pj] == SPACE_EMPTY &&
                         g_board[pi][pj] != SPACE_EMPTY) {
-                        /* 视觉没有但逻辑有 → 补上 */
-                        sprintf(s_msg, "[AI] restore: place %d\r\n", pos);
-                        arm_usart1_print(s_msg);
-                        arm_chess_place(pos);
+                        arm_chess_remove(pos);
                         done = 0;
                         break;
                     }
@@ -453,9 +404,7 @@ void Decision_Update(void)
         }
 
         if (done) {
-            arm_usart1_print("[AI] board restored\r\n");
             g_sys_state = SYS_STATE_WAIT_HUMAN;
-            PrintBoard();
         }
         break;
     }
@@ -463,8 +412,7 @@ void Decision_Update(void)
     /* ---- 游戏结束 ---- */
     case SYS_STATE_GAME_OVER:
         arm_magnet_off();
-        arm_usart1_print("[AI] game over. send 'R' to restart.\r\n");
-        /* 不再死循环，允许串口发 'R' 重置 */
+        /* 等待外部调用 Decision_Init() 重置 */
         arm_delay_ms(100);
         break;
 
