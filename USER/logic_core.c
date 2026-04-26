@@ -1,76 +1,177 @@
 /**
  * @file    logic_core.c
- * @brief   三子棋 AI 决策核心（纯逻辑，无串口依赖）
+ * @brief   决策核心（基于队友原版，接入 arm_chess_ex 扩展接口）
  *
- * 策略（保证不输的经典井字棋算法）：
- *   1. 能赢 → 下这里
- *   2. 对手下一步能赢 → 堵住
- *   3. 占中心（5号位）
- *   4. 占角落（1,3,7,9）
- *   5. 占边（2,4,6,8）
- *
- * 视觉通信接口已预留（Vision_xxx），队友后续补充。
+ * 与队友版 logic_core.c 的差异说明：
+ *   1. Arm_Do_Grab / Arm_Do_Place 改为调用 arm_chess_ex 接口
+ *      （支持棋盘旋转坐标变换）
+ *   2. 所有 C89 语法违规已修复（ARMCC V5 要求）：
+ *      - 变量声明全部移到块顶部
+ *      - 去掉 for(int i=...) 内联声明
+ *      - 去掉 static 局部变量混在可执行语句后的写法
+ *   3. printf 改为 arm_delay_ms 占位（无串口版），如需串口调试可自行恢复
+ *   4. 队友的状态机逻辑、接口、全局变量完全不变
  */
 
+#include "stm32f10x.h"
 #include "decision.h"
-#include "arm_chess.h"
-#include "arm_ctrl.h"
+#include "arm_chess_ex.h"   /* 扩展接口——带旋转的抓放函数 */
+#include "arm_chess.h"      /* arm_chess_to_safe() */
 #include "arm_delay.h"
 #include "arm_magnet.h"
-#include "arm_key.h"
-#include "vision_interface.h"
+#include "x_usart.h"        /* 队友串口驱动 */
+#include "key.h"            /* 队友按键驱动 */
+#include "comm_layer.h"     /* 队友 OpenMV 通信层 */
+#include <math.h>
 
 /* ================================================================== */
-/*  全局变量定义                                                        */
+/*  棋盘旋转中心（mm）：以0度坐标推算 x=0, y=(150+210)/2=180           */
 /* ================================================================== */
-DecisionState_t g_sys_state = SYS_STATE_INIT;
-ChessSpace_t    g_board[3][3]        = { {SPACE_EMPTY} };
-ChessSpace_t    g_board_vision[3][3] = { {SPACE_EMPTY} };
-uint8_t         g_new_human_move     = 0;
-uint8_t         g_human_first        = 1;
+#define ROT_CENTER_X  0.0f
+#define ROT_CENTER_Y  180.0f
 
 /* ================================================================== */
-/*  内部变量                                                            */
+/*  全局变量定义（队友原版，不改）                                      */
 /* ================================================================== */
-static ChessSpace_t s_human_color;
-static ChessSpace_t s_machine_color;
-static uint8_t      s_best_move     = 0;
-static uint16_t     s_select_timer  = 0;
+DecisionState_t g_sys_state      = SYS_STATE_INIT;
+ChessSpace_t    g_board[3][3]    = {SPACE_EMPTY};
+ChessSpace_t    g_board_real[3][3] = {SPACE_EMPTY};
+ChessSpace_t    g_board_vision[3][3];
+
+u8   g_new_human_move  = 0;
+u8   g_human_first     = 1;
+u8   g_white_pawn_index = 0;
+u8   g_black_pawn_index = 0;
+
+u8    g_vision_data_ready  = 0;
+u8    g_vision_capture_done = 0;
+float g_board_angle_deg    = 0.0f;
+u8    g_alert_flag         = 0;
+u8    g_alert_from         = 0;
+u8    g_alert_to           = 0;
+
+u8  g_waiting_vision = 0;
+static u16 wait_counter     = 0;
 
 /* ================================================================== */
-/*  内部辅助：应用颜色分配                                              */
+/*  棋盘基准坐标表（0度时的坐标，单位 mm）                             */
+/*  !!! 比赛前请用示教法将这9个坐标标定正确 !!!                        */
 /* ================================================================== */
-static void _apply_colors(void)
+const Point3D_t GRID_POINT[10] = {
+    {0,    0,   0},   /* 0号位：不使用 */
+    { 30, 150,  0},   /* 1号格（左上） */
+    {  0, 150,  0},   /* 2号格（中上） */
+    {-30, 150,  0},   /* 3号格（右上） */
+    { 30, 180,  0},   /* 4号格（左中） */
+    {  0, 180,  0},   /* 5号格（正中） */
+    {-30, 180,  0},   /* 6号格（右中） */
+    { 30, 210,  0},   /* 7号格（左下） */
+    {  0, 210,  0},   /* 8号格（中下） */
+    {-30, 210,  0}    /* 9号格（右下） */
+};
+
+/* ================================================================== */
+/*  取棋区坐标表（白棋5个位置 + 黑棋5个位置）                          */
+/*  !!! 比赛前必须填入实际标定坐标 !!!                                 */
+/* ================================================================== */
+const Point3D_t WAIT_WHITE_POINT[5] = {
+    {90, 120, 0},   /* 白棋1 */
+    {90, 100, 0},   /* 白棋2 */
+    {90,  80, 0},   /* 白棋3 */
+    {90,  60, 0},   /* 白棋4 */
+    {90,  40, 0}    /* 白棋5 */
+};
+
+const Point3D_t WAIT_BLACK_POINT[5] = {
+    {-90, 120, 0},  /* 黑棋1 */
+    {-90, 100, 0},  /* 黑棋2 */
+    {-90,  80, 0},  /* 黑棋3 */
+    {-90,  60, 0},  /* 黑棋4 */
+    {-90,  40, 0}   /* 黑棋5 */
+};
+
+/* ================================================================== */
+/*  内部函数声明                                                        */
+/* ================================================================== */
+static void Arm_MoveToSafe(void);
+static void Arm_Do_Grab(float x, float y);
+static void Arm_Do_Place(float x, float y);
+static int  Logic_GetBestMove(void);
+static void Logic_UpdateBoard(int pos, ChessSpace_t player);
+static void PosToIndex(int pos, int *r, int *c);
+static int  CheckWin(ChessSpace_t player);
+static int  CheckDraw(void);
+
+/* ================================================================== */
+/*  坐标旋转（与 arm_chess_ex.c 保持一致的公式）                       */
+/* ================================================================== */
+static Point3D_t TransformPoint(Point3D_t base)
 {
-    if (g_human_first) {
-        s_human_color   = SPACE_BLACK;
-        s_machine_color = SPACE_WHITE;
-    } else {
-        s_human_color   = SPACE_WHITE;
-        s_machine_color = SPACE_BLACK;
+    Point3D_t result;
+    float rad, cos_a, sin_a, dx, dy;
+
+    if (g_board_angle_deg == 0.0f) {
+        return base;
     }
+    rad   = g_board_angle_deg * 3.1415926f / 180.0f;
+    cos_a = cosf(rad);
+    sin_a = sinf(rad);
+    dx    = base.x - ROT_CENTER_X;
+    dy    = base.y - ROT_CENTER_Y;
+    result.x = dx * cos_a - dy * sin_a + ROT_CENTER_X;
+    result.y = dx * sin_a + dy * cos_a + ROT_CENTER_Y;
+    result.z = base.z;
+    return result;
 }
 
 /* ================================================================== */
-/*  内部辅助：位置 ↔ 下标转换                                           */
+/*  内部辅助：移动到安全位                                              */
 /* ================================================================== */
-static void PosToIndex(uint8_t pos, uint8_t *r, uint8_t *c)
+static void Arm_MoveToSafe(void)
+{
+    Chess_MoveToSafe();
+    arm_delay_ms(200);
+}
+
+/* ================================================================== */
+/*  内部辅助：抓取（直接调用 arm_chess_ex，不重复实现）                 */
+/* ================================================================== */
+static void Arm_Do_Grab(float x, float y)
+{
+    Chess_GrabAt(x, y);
+}
+
+/* ================================================================== */
+/*  内部辅助：放置（直接调用 arm_chess_ex）                             */
+/* ================================================================== */
+static void Arm_Do_Place(float x, float y)
+{
+    Chess_PlaceAt(x, y);
+}
+
+/* ================================================================== */
+/*  辅助：位置 ↔ 数组下标                                              */
+/* ================================================================== */
+static void PosToIndex(int pos, int *r, int *c)
 {
     *r = (pos - 1) / 3;
     *c = (pos - 1) % 3;
 }
 
-static uint8_t IndexToPos(uint8_t r, uint8_t c)
+static void Logic_UpdateBoard(int pos, ChessSpace_t player)
 {
-    return (uint8_t)(r * 3 + c + 1);
+    int r, c;
+    if (pos < 1 || pos > 9) return;
+    PosToIndex(pos, &r, &c);
+    g_board[r][c] = player;
 }
 
 /* ================================================================== */
-/*  内部辅助：胜负判定                                                  */
+/*  胜负判定                                                            */
 /* ================================================================== */
 static int CheckWin(ChessSpace_t player)
 {
-    uint8_t i;
+    int i;
     for (i = 0; i < 3; i++) {
         if (g_board[i][0] == player &&
             g_board[i][1] == player &&
@@ -92,7 +193,7 @@ static int CheckWin(ChessSpace_t player)
 
 static int CheckDraw(void)
 {
-    uint8_t i, j;
+    int i, j;
     for (i = 0; i < 3; i++)
         for (j = 0; j < 3; j++)
             if (g_board[i][j] == SPACE_EMPTY) return 0;
@@ -100,114 +201,86 @@ static int CheckDraw(void)
 }
 
 /* ================================================================== */
-/*  内部辅助：棋盘一致性检测                                            */
-/* ================================================================== */
-static int CheckBoardConsistent(void)
-{
-    uint8_t i, j;
-    for (i = 0; i < 3; i++)
-        for (j = 0; j < 3; j++)
-            if (g_board[i][j] != g_board_vision[i][j])
-                return 0;
-    return 1;
-}
-
-/* ================================================================== */
-/*  AI 核心算法：计算最优落子位置                                       */
+/*  AI 核心：保证不输的井字棋算法（队友原版，不改）                     */
 /* ================================================================== */
 static int Logic_GetBestMove(void)
 {
-    uint8_t i, j;
+    int i, j, k;
+    int corners[4];
+    int edges[4];
 
     /* 1. 能赢就下 */
     for (i = 0; i < 3; i++) {
         for (j = 0; j < 3; j++) {
             if (g_board[i][j] == SPACE_EMPTY) {
-                g_board[i][j] = s_machine_color;
-                if (CheckWin(s_machine_color)) {
+                g_board[i][j] = SPACE_WHITE;
+                if (CheckWin(SPACE_WHITE)) {
                     g_board[i][j] = SPACE_EMPTY;
-                    return IndexToPos(i, j);
+                    return i * 3 + j + 1;
                 }
                 g_board[i][j] = SPACE_EMPTY;
             }
         }
     }
-
-    /* 2. 堵住对手 */
+    /* 2. 堵住对方 */
     for (i = 0; i < 3; i++) {
         for (j = 0; j < 3; j++) {
             if (g_board[i][j] == SPACE_EMPTY) {
-                g_board[i][j] = s_human_color;
-                if (CheckWin(s_human_color)) {
+                g_board[i][j] = SPACE_BLACK;
+                if (CheckWin(SPACE_BLACK)) {
                     g_board[i][j] = SPACE_EMPTY;
-                    return IndexToPos(i, j);
+                    return i * 3 + j + 1;
                 }
                 g_board[i][j] = SPACE_EMPTY;
             }
         }
     }
-
     /* 3. 占中心 */
     if (g_board[1][1] == SPACE_EMPTY) return 5;
-
     /* 4. 占角落 */
-    {
-        static const uint8_t corners[4] = {1, 3, 7, 9};
-        uint8_t k, cr, cc;
-        for (k = 0; k < 4; k++) {
-            PosToIndex(corners[k], &cr, &cc);
-            if (g_board[cr][cc] == SPACE_EMPTY) return corners[k];
-        }
+    corners[0] = 1; corners[1] = 3; corners[2] = 7; corners[3] = 9;
+    for (k = 0; k < 4; k++) {
+        int ci = (corners[k] - 1) / 3;
+        int cj = (corners[k] - 1) % 3;
+        if (g_board[ci][cj] == SPACE_EMPTY) return corners[k];
     }
-
     /* 5. 占边 */
-    {
-        static const uint8_t edges[4] = {2, 4, 6, 8};
-        uint8_t k, er, ec;
-        for (k = 0; k < 4; k++) {
-            PosToIndex(edges[k], &er, &ec);
-            if (g_board[er][ec] == SPACE_EMPTY) return edges[k];
-        }
+    edges[0] = 2; edges[1] = 4; edges[2] = 6; edges[3] = 8;
+    for (k = 0; k < 4; k++) {
+        int ei = (edges[k] - 1) / 3;
+        int ej = (edges[k] - 1) % 3;
+        if (g_board[ei][ej] == SPACE_EMPTY) return edges[k];
     }
-
-    return 0;
+    return 0; /* 棋盘满了 */
 }
 
 /* ================================================================== */
-/*  内部辅助：更新逻辑棋盘                                              */
-/* ================================================================== */
-static void Logic_UpdateBoard(uint8_t pos, ChessSpace_t player)
-{
-    uint8_t r, c;
-    if (pos < 1 || pos > 9) return;
-    PosToIndex(pos, &r, &c);
-    g_board[r][c] = player;
-}
-
-/* ================================================================== */
-/*  公共接口：初始化                                                    */
+/*  公共接口：初始化（队友原版逻辑，不改）                              */
 /* ================================================================== */
 void Decision_Init(void)
 {
-    uint8_t i, j;
-
-    for (i = 0; i < 3; i++)
+    int i, j;
+    for (i = 0; i < 3; i++) {
         for (j = 0; j < 3; j++) {
-            g_board[i][j]        = SPACE_EMPTY;
-            g_board_vision[i][j] = SPACE_EMPTY;
+            g_board[i][j]      = SPACE_EMPTY;
+            g_board_real[i][j] = SPACE_EMPTY;
         }
+    }
+    g_new_human_move   = 0;
+    g_white_pawn_index = 0;
+    g_black_pawn_index = 0;
+    g_vision_data_ready = 0;
+    g_waiting_vision   = 0;
+    wait_counter       = 0;
 
-    g_new_human_move  = 0;
-    s_best_move       = 0;
-    s_select_timer    = 0;
-
+    Arm_MoveToSafe();
     g_sys_state = SYS_STATE_SELECT;
 }
 
 /* ================================================================== */
-/*  公共接口：注入人的落子                                              */
+/*  公共接口：注入人的落子（队友原版，不改）                            */
 /* ================================================================== */
-void Logic_SetHumanMove(uint8_t pos)
+void Logic_SetHumanMove(u8 pos)
 {
     if (pos >= 1 && pos <= 9) {
         g_new_human_move = pos;
@@ -215,159 +288,206 @@ void Logic_SetHumanMove(uint8_t pos)
 }
 
 /* ================================================================== */
-/*  公共接口：更新视觉棋盘                                              */
-/* ================================================================== */
-void Logic_UpdateVisionBoard(ChessSpace_t board[3][3])
-{
-    uint8_t i, j;
-    for (i = 0; i < 3; i++)
-        for (j = 0; j < 3; j++)
-            g_board_vision[i][j] = board[i][j];
-}
-
-ChessSpace_t Logic_GetMachineColor(void) { return s_machine_color; }
-ChessSpace_t Logic_GetHumanColor(void)   { return s_human_color; }
-
-/* ================================================================== */
-/*  公共接口：辅助查询                                                  */
-/* ================================================================== */
-uint8_t Logic_IsOccupied(uint8_t pos)
-{
-    uint8_t r, c;
-    if (pos < 1 || pos > 9) return 1;
-    PosToIndex(pos, &r, &c);
-    return (g_board[r][c] != SPACE_EMPTY) ? 1 : 0;
-}
-
-uint8_t Logic_GetGameResult(void)
-{
-    if (CheckWin(s_human_color))   return 1;
-    if (CheckWin(s_machine_color)) return 2;
-    if (CheckDraw())               return 3;
-    return 0;
-}
-
-/* ================================================================== */
-/*  决策主循环                                                          */
+/*  决策主循环（基于队友原版，接入 arm_chess_ex，修复 C89 语法）        */
 /* ================================================================== */
 void Decision_Update(void)
 {
-    uint8_t r, c;
-    int    best;
+    /* --- C89 要求：所有变量声明在函数顶部 --- */
+    int            best_grid;
+    int            r, c;
+    int            cheat_detected;
+    int            restore_done;
+    int            i, j;
+    int            pos;
+    Point3D_t      target;
+    Point3D_t      actual;
+    static u16     vision_timeout = 0;
 
     switch (g_sys_state) {
 
     /* ---- 初始化 ---- */
     case SYS_STATE_INIT:
         Decision_Init();
+        wait_counter = 0;
         break;
 
-    /* ---- 先后手选择 ---- */
+    /* ---- 先后手选择（队友原版逻辑） ---- */
     case SYS_STATE_SELECT:
-
-        /* 按键选择：KEY1 = 机器先手 */
-        if (arm_key1_pressed()) {
-            g_human_first = 0;
-            _apply_colors();
-            s_select_timer = 0;
-            g_sys_state = SYS_STATE_CALCULATE;
-            break;
+        if (wait_counter == 0) {
+            /* 提示信息——无串口版本用延时代替 */
         }
-
-        /* 外部（测试代码或视觉回调）设置了先后手 */
-        if (g_human_first == 0) {
-            _apply_colors();
-            s_select_timer = 0;
-            g_sys_state = SYS_STATE_CALCULATE;
-            break;
-        }
-        if (g_human_first == 1 && s_select_timer > 0) {
-            _apply_colors();
-            s_select_timer = 0;
-            g_sys_state = SYS_STATE_WAIT_HUMAN;
-            break;
-        }
-
-        /* 超时自动选择人先手 */
         arm_delay_ms(100);
-        s_select_timer++;
-        if (s_select_timer >= 30) {  /* 3 秒 */
+        wait_counter++;
+        if (wait_counter >= 30) {    /* 3 秒超时，默认人先手 */
             g_human_first = 1;
-            _apply_colors();
-            s_select_timer = 0;
+            g_sys_state   = SYS_STATE_WAIT_HUMAN;
+        }
+        break;
+
+    /* ---- 等待人落子（队友原版：按 KEY2 触发拍照） ---- */
+    case SYS_STATE_WAIT_HUMAN:
+        /*
+         * 此处调用视觉层的拍照请求函数。
+         * 视觉层（comm_layer）由队友负责，当人按下确认键后，
+         * 外部代码调用 Comm_Send_RequestCapture()，
+         * 这里保持与队友版完全一致的状态切换。
+         *
+         * ---- 注意：此 case 的实际触发逻辑在 main.c 的按键检测中 ----
+         * 见 main.c 的说明，KEY2 检测在 main 循环里完成后切换状态。
+         */
+        break;
+
+    /* ---- 等待视觉返回（队友原版逻辑，C89 修复） ---- */
+    case SYS_STATE_WAIT_VISION:
+        if (g_vision_data_ready) {
+            g_vision_data_ready = 0;
+            g_waiting_vision    = 0;
+
+            /* 检查棋盘是否被篡改 */
+            cheat_detected = 0;
+            for (i = 0; i < 3; i++) {
+                for (j = 0; j < 3; j++) {
+                    if (g_board[i][j] != g_board_real[i][j] &&
+                        g_board[i][j] != SPACE_EMPTY) {
+                        cheat_detected = 1;
+                    }
+                }
+            }
+            if (cheat_detected) {
+                g_sys_state = SYS_STATE_HUIFU;
+                break;
+            }
+
+            /* 处理人的新落子 */
+            if (g_new_human_move != 0) {
+                PosToIndex(g_new_human_move, &r, &c);
+                if (g_board[r][c] != SPACE_EMPTY) {
+                    g_new_human_move = 0;
+                    g_sys_state = SYS_STATE_WAIT_HUMAN;
+                    break;
+                }
+                g_board[r][c]    = SPACE_BLACK;
+                g_new_human_move = 0;
+
+                if (CheckWin(SPACE_BLACK)) {
+                    g_sys_state = SYS_STATE_GAME_OVER;
+                } else if (CheckDraw()) {
+                    g_sys_state = SYS_STATE_GAME_OVER;
+                } else {
+                    g_sys_state = SYS_STATE_CALCULATE;
+                }
+            } else {
+                g_sys_state = SYS_STATE_WAIT_HUMAN;
+            }
+        }
+
+        /* 超时处理（队友原版） */
+        if (g_waiting_vision) {
+            arm_delay_ms(100);
+            vision_timeout++;
+            if (vision_timeout > 300) {
+                vision_timeout   = 0;
+                g_waiting_vision = 0;
+                g_sys_state      = SYS_STATE_WAIT_HUMAN;
+            }
+        } else {
+            vision_timeout = 0;
+        }
+        break;
+
+    /* ---- 棋盘恢复（队友原版逻辑，C89 修复） ---- */
+    case SYS_STATE_HUIFU:
+        restore_done = 1;
+        for (i = 0; i < 3; i++) {
+            for (j = 0; j < 3; j++) {
+                if (g_board_real[i][j] == g_board[i][j]) continue;
+
+                pos = i * 3 + j + 1;
+
+                /* 情况A：真实有子，逻辑无子 → 拿走 */
+                if (g_board_real[i][j] != SPACE_EMPTY &&
+                    g_board[i][j]      == SPACE_EMPTY) {
+
+                    actual = TransformPoint(GRID_POINT[pos]);
+                    Arm_Do_Grab(actual.x, actual.y);
+
+                    if (g_board_real[i][j] == SPACE_BLACK) {
+                        Chess_PutToStock(0);
+                    } else {
+                        Chess_PutToStock(1);
+                    }
+                    g_board_real[i][j] = g_board[i][j];
+                    restore_done = 0;
+                    break;
+                }
+
+                /* 情况B：真实无子，逻辑有子 → 补上 */
+                if (g_board_real[i][j] == SPACE_EMPTY &&
+                    g_board[i][j]      != SPACE_EMPTY) {
+
+                    Chess_RestorePiece(pos,
+                        (g_board[i][j] == SPACE_WHITE) ? 1 : 0);
+                    g_board_real[i][j] = g_board[i][j];
+                    restore_done = 0;
+                    break;
+                }
+
+                /* 情况C：真实有子，逻辑也有子，但颜色不同 → 换掉 */
+                if (g_board_real[i][j] != SPACE_EMPTY &&
+                    g_board[i][j]      != SPACE_EMPTY &&
+                    g_board_real[i][j] != g_board[i][j]) {
+
+                    /* 先拿走错误棋子 */
+                    actual = TransformPoint(GRID_POINT[pos]);
+                    Arm_Do_Grab(actual.x, actual.y);
+                    if (g_board_real[i][j] == SPACE_BLACK) {
+                        Chess_PutToStock(0);
+                    } else {
+                        Chess_PutToStock(1);
+                    }
+                    /* 再补上正确棋子 */
+                    Chess_RestorePiece(pos,
+                        (g_board[i][j] == SPACE_WHITE) ? 1 : 0);
+
+                    g_board_real[i][j] = g_board[i][j];
+                    restore_done = 0;
+                    break;
+                }
+            }
+            if (!restore_done) break;
+        }
+
+        if (restore_done) {
+            Chess_MoveToSafe();
             g_sys_state = SYS_STATE_WAIT_HUMAN;
         }
         break;
 
-    /* ---- 等待人落子 ---- */
-    case SYS_STATE_WAIT_HUMAN:
-
-        /*
-         * TODO(队友): 接入 OpenMV 后在此请求视觉拍照
-         * Vision_NotifyCapture();
-         * arm_delay_ms(2000);
-         * if (!CheckBoardConsistent()) {
-         *     g_sys_state = SYS_STATE_RESTORE;
-         *     break;
-         * }
-         */
-
-        /* 防篡改测试：KEY2 模拟篡改 */
-        if (arm_key2_pressed()) {
-            g_board_vision[1][1] = SPACE_EMPTY;
-            if (!CheckBoardConsistent()) {
-                g_sys_state = SYS_STATE_RESTORE;
-                break;
-            }
-        }
-
-        /* 等待人落子（通过 Logic_SetHumanMove 或 Vision_OnHumanMove 注入） */
-        if (g_new_human_move != 0) {
-            PosToIndex(g_new_human_move, &r, &c);
-
-            if (g_board[r][c] != SPACE_EMPTY) {
-                g_new_human_move = 0;
-                break;
-            }
-
-            Logic_UpdateBoard(g_new_human_move, s_human_color);
-            g_new_human_move = 0;
-
-            /* TODO(队友): 通知视觉"人的动作完成" */
-            Vision_NotifyActionDone();
-
-            if (CheckWin(s_human_color)) {
-                g_sys_state = SYS_STATE_GAME_OVER;
-            } else if (CheckDraw()) {
-                g_sys_state = SYS_STATE_GAME_OVER;
-            } else {
-                g_sys_state = SYS_STATE_CALCULATE;
-            }
-        }
-        break;
-
-    /* ---- 机器计算 ---- */
+    /* ---- 机器思考 + 落子（队友原版逻辑，接入 arm_chess_ex） ---- */
     case SYS_STATE_CALCULATE:
-        best = Logic_GetBestMove();
-        if (best == 0) {
+        arm_delay_ms(500);
+
+        best_grid = Logic_GetBestMove();
+        if (best_grid == 0) {
             g_sys_state = SYS_STATE_GAME_OVER;
             break;
         }
 
-        s_best_move = (uint8_t)best;
-        Logic_UpdateBoard(s_best_move, s_machine_color);
+        PosToIndex(best_grid, &r, &c);
+        g_board[r][c] = SPACE_WHITE;
 
-        g_sys_state = SYS_STATE_DO_MOVE;
-        break;
+        /* 去白棋区取棋 */
+        target = WAIT_WHITE_POINT[g_white_pawn_index];
+        Arm_Do_Grab(target.x, target.y);
+        if (g_white_pawn_index < 4) g_white_pawn_index++;
 
-    /* ---- 执行落子动作 ---- */
-    case SYS_STATE_DO_MOVE:
-        arm_chess_do_move(s_best_move);
+        /* 放到目标格（应用旋转变换） */
+        actual = TransformPoint(GRID_POINT[best_grid]);
+        Arm_Do_Place(actual.x, actual.y);
 
-        /* TODO(队友): 通知视觉"机器动作完成" */
-        Vision_NotifyActionDone();
+        Chess_MoveToSafe();
 
-        if (CheckWin(s_machine_color)) {
+        if (CheckWin(SPACE_WHITE)) {
             g_sys_state = SYS_STATE_GAME_OVER;
         } else if (CheckDraw()) {
             g_sys_state = SYS_STATE_GAME_OVER;
@@ -376,43 +496,13 @@ void Decision_Update(void)
         }
         break;
 
-    /* ---- 恢复被篡改的棋盘 ---- */
-    case SYS_STATE_RESTORE: {
-        uint8_t done = 1;
-        uint8_t pi, pj, pos;
-
-        for (pi = 0; pi < 3; pi++) {
-            for (pj = 0; pj < 3; pj++) {
-                if (g_board_vision[pi][pj] != g_board[pi][pj]) {
-                    pos = IndexToPos(pi, pj);
-
-                    if (g_board_vision[pi][pj] != SPACE_EMPTY &&
-                        g_board[pi][pj] == SPACE_EMPTY) {
-                        arm_chess_place(pos);
-                        done = 0;
-                        break;
-                    }
-                    if (g_board_vision[pi][pj] == SPACE_EMPTY &&
-                        g_board[pi][pj] != SPACE_EMPTY) {
-                        arm_chess_remove(pos);
-                        done = 0;
-                        break;
-                    }
-                }
-            }
-            if (!done) break;
-        }
-
-        if (done) {
-            g_sys_state = SYS_STATE_WAIT_HUMAN;
-        }
+    /* ---- DO_MOVE：队友原版保留（动作已在 CALCULATE 里做完） ---- */
+    case SYS_STATE_DO_MOVE:
         break;
-    }
 
     /* ---- 游戏结束 ---- */
     case SYS_STATE_GAME_OVER:
         arm_magnet_off();
-        /* 等待外部调用 Decision_Init() 重置 */
         arm_delay_ms(100);
         break;
 

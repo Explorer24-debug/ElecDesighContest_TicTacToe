@@ -1,111 +1,71 @@
 /**
  * @file    decision.h
- * @brief   三子棋决策系统接口
+ * @brief   决策系统对外接口（队友原版接口保持不变）
  *
- * 状态机流程：
- *   INIT → SELECT → WAIT_HUMAN / CALCULATE → DO_MOVE → WAIT_HUMAN → ... → GAME_OVER
- *
- * 全局变量：
- *   g_sys_state        当前状态
- *   g_board[3][3]      逻辑棋盘
- *   g_board_vision[3][3] 视觉棋盘（队友填充）
- *   g_new_human_move   人的新落子位置（1~9），0 表示无
- *   g_human_first      1=人先手（默认），0=机器先手
+ * 本文件与队友的 decision.h 接口完全兼容，
+ * 仅去掉了对 comm_layer.h 的依赖（comm_layer 由 main.c 单独引入）。
  */
 
-#ifndef DECISION_H
-#define DECISION_H
+#ifndef __DECISION_H
+#define __DECISION_H
 
 #include "stm32f10x.h"
 
 /* ================================================================== */
-/*  棋盘状态枚举                                                        */
+/*  棋盘与状态枚举（队友原版，不改）                                    */
 /* ================================================================== */
 typedef enum {
     SPACE_EMPTY = 0,
-    SPACE_BLACK,   /* 黑棋 */
-    SPACE_WHITE    /* 白棋 */
+    SPACE_BLACK,    /* 黑棋（人） */
+    SPACE_WHITE     /* 白棋（机器） */
 } ChessSpace_t;
 
-/* ================================================================== */
-/*  决策状态机                                                          */
-/* ================================================================== */
 typedef enum {
-    SYS_STATE_INIT,        /* 初始化 */
+    SYS_STATE_INIT,
+    SYS_STATE_WAIT_HUMAN,
+    SYS_STATE_CALCULATE,
+    SYS_STATE_DO_MOVE,
+    SYS_STATE_GAME_OVER,
+    SYS_STATE_HUIFU,       /* 恢复被篡改的棋盘 */
+    SYS_STATE_CHECK_BOARD,
     SYS_STATE_SELECT,      /* 先后手选择 */
-    SYS_STATE_WAIT_HUMAN,  /* 等待人落子 */
-    SYS_STATE_CALCULATE,   /* 机器计算最优位置 */
-    SYS_STATE_DO_MOVE,     /* 执行落子动作 */
-    SYS_STATE_GAME_OVER,   /* 游戏结束 */
-    SYS_STATE_RESTORE      /* 恢复被篡改的棋盘 */
+    SYS_STATE_WAIT_VISION  /* 等待视觉返回结果 */
 } DecisionState_t;
 
 /* ================================================================== */
-/*  全局变量声明（在 logic_core.c 中定义）                               */
+/*  坐标点结构体（队友原版，不改）                                      */
+/* ================================================================== */
+typedef struct {
+    float x;
+    float y;
+    float z;
+} Point3D_t;
+
+/* ================================================================== */
+/*  全局变量声明（队友原版，不改）                                      */
 /* ================================================================== */
 extern DecisionState_t g_sys_state;
 extern ChessSpace_t    g_board[3][3];
-extern ChessSpace_t    g_board_vision[3][3];
-extern uint8_t         g_new_human_move;
-extern uint8_t         g_human_first;
+extern ChessSpace_t    g_board_real[3][3];
+extern u8  g_new_human_move;
+extern u8  g_human_first;
+extern u8  g_white_pawn_index;
+extern u8  g_black_pawn_index;
+
+/* 视觉通信标志（队友原版，不改） */
+extern u8    g_vision_data_ready;
+extern u8    g_vision_capture_done;
+extern float g_board_angle_deg;
+extern u8    g_alert_flag;
+extern u8    g_alert_from;
+extern u8    g_alert_to;
+extern u8    g_waiting_vision;
 
 /* ================================================================== */
-/*  接口函数                                                            */
+/*  公共接口函数（队友原版，不改）                                      */
 /* ================================================================== */
-
-/**
- * @brief  初始化决策系统（清空棋盘、进入 SELECT 状态）
- */
 void Decision_Init(void);
-
-/**
- * @brief  决策主循环（在 main 的 while(1) 中循环调用）
- *
- * 内部状态机自动推进：
- *   SELECT → 等待按键/串口选择先后手 → 超时默认人先手
- *   WAIT_HUMAN → 等待人落子 → 检查胜负
- *   CALCULATE → AI 计算最优位置
- *   DO_MOVE → 执行机械臂动作 → 回到 WAIT_HUMAN 或 GAME_OVER
- *   GAME_OVER → 等待重置
- *   RESTORE → 恢复被篡改的棋盘
- */
 void Decision_Update(void);
+void Logic_SetHumanMove(u8 pos);
 
-/**
- * @brief  注入人的落子位置
- * @param  pos  1~9
- *
- * 供队友在视觉回调中调用，或供测试代码直接注入。
- */
-void Logic_SetHumanMove(uint8_t pos);
-
-/**
- * @brief  供视觉层调用：更新视觉识别到的棋盘
- * @param  board  3x3 棋盘数组
- */
-void Logic_UpdateVisionBoard(ChessSpace_t board[3][3]);
-
-/**
- * @brief  获取机器方颜色
- */
-ChessSpace_t Logic_GetMachineColor(void);
-
-/**
- * @brief  获取人方颜色
- */
-ChessSpace_t Logic_GetHumanColor(void);
-
-/**
- * @brief  检查指定位置是否被占用
- * @param  pos  1~9
- * @return 1 = 被占用，0 = 空位
- */
-uint8_t Logic_IsOccupied(uint8_t pos);
-
-/**
- * @brief  检查游戏是否结束
- * @return 0=进行中, 1=人赢, 2=机器赢, 3=平局
- */
-uint8_t Logic_GetGameResult(void);
-
-#endif /* DECISION_H */
+#endif /* __DECISION_H */

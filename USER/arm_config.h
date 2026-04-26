@@ -85,9 +85,9 @@
 /*  每个坐标：(x_mm, y_mm)                                             */
 /*  z 坐标由动作函数根据悬停/放子高度动态计算                             */
 /* ================================================================== */
-#define BOARD_Z_SAFE     100.0f   /* 安全悬停高度 mm                     */
-#define BOARD_Z_DOWN     55.0f    /* 放子/取子高度 mm                    */
-#define BOARD_Z_PICKUP   55.0f    /* 取棋子高度 mm                       */
+#define BOARD_Z_SAFE      70.0f   /* 安全悬停高度 mm（下降前先悬停）       */
+#define BOARD_Z_DOWN      25.0f   /* 放子高度 mm（电磁铁断电释放棋子）     */
+#define BOARD_Z_PICKUP    25.0f   /* 取子高度 mm（电磁铁通电吸住棋子）     */
 
 /*
  * 以下坐标需要用示教法标定！
