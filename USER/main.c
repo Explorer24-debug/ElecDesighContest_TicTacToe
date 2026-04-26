@@ -257,10 +257,8 @@ int main(void)
     arm_magnet_init();
     arm_chess_init();   /* 初始化棋盘基准坐标表（从 arm_config.h 读取） */
 
-    /* ---- 4. 上电归中 ---- */
-    arm_ctrl_reset(2000);
-    arm_ctrl_wait_done(3000);
-    arm_delay_ms(500);
+    /* ---- 4. 跳过上电归位（归位时垂直伸展会打到摄像头） ---- */
+    /*      直接移到安全位，高度 = BOARD_Z_SAFE（与悬停高度一致）  */
 
     /* ---- 5. 移到安全位 ---- */
     Chess_MoveToSafe();

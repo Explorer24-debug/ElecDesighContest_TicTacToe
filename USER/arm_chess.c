@@ -150,5 +150,5 @@ void arm_chess_remove(uint8_t pos)
 /* ================================================================== */
 void arm_chess_to_safe(void)
 {
-    _move_and_wait(0.0f, 150.0f, BOARD_Z_SAFE, 1200);
+    _move_and_wait(100.0f, 30.0f, BOARD_Z_SAFE, 1200);
 }

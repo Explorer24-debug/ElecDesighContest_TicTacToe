@@ -90,7 +90,7 @@ void Chess_PlaceAt(float x, float y)
 
 void Chess_MoveToSafe(void)
 {
-    _go(0.0f, 150.0f, BOARD_Z_SAFE, 1200);
+    _go(100.0f, 30.0f, BOARD_Z_SAFE, 1200);
 }
 
 /* ================================================================== */
