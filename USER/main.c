@@ -62,6 +62,7 @@
 #include "arm_chess.h"
 #include "arm_chess_ex.h"
 #include "arm_delay.h"
+#include "arm_config.h"
 #include "decision.h"
 #include "comm_layer.h"
 #include "key.h"
@@ -70,8 +71,7 @@
 /* ============================================================
  *  运行模式宏
  * ============================================================ */
-#define TEST_MODE   1   /* 1=测试模式, 0=正式运行 */
-#define TEST_CASE   1   /* 1=普通对弈, 2=作弊恢复, 3=旋转对弈 */
+#define TEST_MODE   0   /* 1=测试模式, 0=正式运行 */
 
 /* ============================================================
  *  测试用辅助函数（仅 TEST_MODE=1 时使用）
@@ -257,10 +257,7 @@ int main(void)
     arm_magnet_init();
     arm_chess_init();   /* 初始化棋盘基准坐标表（从 arm_config.h 读取） */
 
-    /* ---- 4. 跳过上电归位（归位时垂直伸展会打到摄像头） ---- */
-    /*      直接移到安全位，高度 = BOARD_Z_SAFE（与悬停高度一致）  */
-
-    /* ---- 5. 移到安全位 ---- */
+    /* ---- 4. 移到安全位 ---- */
     Chess_MoveToSafe();
     arm_ctrl_wait_done(3000);
 
@@ -280,42 +277,52 @@ int main(void)
 
     /* 所有测试完成后，回安全位停住 */
     Chess_MoveToSafe();
-    while (1) { arm_delay_ms(1000); }
+    //while (1) { arm_delay_ms(1000); }
 
 #else   /* TEST_MODE == 0：正式运行 */
 
     /* ================================================================
      *  正式运行模式
-     *  需要队友将以下文件加入工程：
-     *    - comm_layer.h / comm_layer.c
-     *    - key.h / key.c
-     *    - x_usart.h / x_usart.c
-     *  并打开文件顶部注释的 #include
+     *  通信：USART2 ↔ OpenMV，MCU 主动发送请求，视觉被动回复
+     *
+     *  按键：
+     *    KEY1 (PA8)  = 机器先手（在 SELECT 状态时按下）
+     *    KEY2 (PA11) = 人确认落子 → 触发 MCU 发送 "S\n" 给 OpenMV
+     *                  OpenMV 拍照后回复 VB 消息（棋盘状态）
+     *                  MCU 解析后推进状态机
+     *
+     *  状态机流程（logic_core.c Decision_Update）：
+     *    SELECT → WAIT_HUMAN → [KEY2] → WAIT_VISION →
+     *    [视觉返回VB] → {HUIFU(作弊恢复) 或 CALCULATE(机器下棋)} →
+     *    WAIT_HUMAN → ... → GAME_OVER
      * ================================================================ */
-
+    tb_usart_init();
     Decision_Init();
     Key_Init();
     Comm_Init();
-	tb_usart_init();
+ 
+
+    printf("=== USART1 Debug Ready (115200) ===\r\n");
+    printf("=== USART2 Vision Ready (115200) ===\r\n");
 
     {
         char rx_buf[64];
 
         while (1)
         {
-            /* -- 视觉数据接收 -- */
+            /* -- 视觉数据接收（USART2 中断收帧，主循环轮询解析） -- */
             if (USART2_Vision_GetRxFlag()) {
                 USART2_Vision_ReadString(rx_buf);
                 Comm_Parse_Received_Data(rx_buf);
             }
 
-            /* -- KEY1：机器先手 -- */
+            /* -- KEY1：机器先手（仅在 SELECT 状态有效） -- */
             if (Key_GetNum1() && g_sys_state == SYS_STATE_SELECT) {
                 g_human_first = 0;
                 g_sys_state   = SYS_STATE_CALCULATE;
             }
 
-            /* -- KEY2：人确认落子，触发视觉拍照 -- */
+            /* -- KEY2：人确认落子，MCU 向 OpenMV 发送拍照请求 "S\n" -- */
             if (Key_GetNum2() && g_sys_state == SYS_STATE_WAIT_HUMAN) {
                 Comm_Send_RequestCapture();
                 g_waiting_vision    = 1;

@@ -67,12 +67,31 @@ static void _go(float x, float y, float z, uint32_t t_ms)
 }
 
 /* ================================================================== */
+/*  内部：经过过渡点移动（远距离移动时先收缩手臂避开摄像头）              */
+/*                                                                     */
+/*  轨迹：当前位置 → 过渡点(收缩+低头) → 目标上方(巡航高度) → 目标      */
+/* ================================================================== */
+static void _go_via(float x, float y, float z, uint32_t t_ms)
+{
+    /* 第一步：先去过渡点（收缩手臂，降低高度） */
+    _go(WAYPOINT_X, WAYPOINT_Y, BOARD_Z_CRUISE, 800);
+
+    /* 第二步：移到目标位置上方（保持巡航高度平移） */
+    _go(x, y, BOARD_Z_CRUISE, 1000);
+
+    /* 第三步：上升到目标高度 */
+    _go(x, y, z, 600);
+}
+
+/* ================================================================== */
 /*  1. 基础动作接口                                                     */
 /* ================================================================== */
 
 void Chess_GrabAt(float x, float y)
 {
-    _go(x, y, BOARD_Z_SAFE,   1000);   /* 悬停上方 */
+    /* 先经过过渡点，降到巡航高度，再移到目标上方 */
+    _go_via(x, y, BOARD_Z_SAFE, 1000);
+
     _go(x, y, BOARD_Z_PICKUP,  800);   /* 下降 */
     arm_magnet_on();
     arm_delay_ms(300);                  /* 等待磁力稳定 */
@@ -81,7 +100,9 @@ void Chess_GrabAt(float x, float y)
 
 void Chess_PlaceAt(float x, float y)
 {
-    _go(x, y, BOARD_Z_SAFE,  1000);    /* 悬停上方 */
+    /* 先经过过渡点，降到巡航高度，再移到目标上方 */
+    _go_via(x, y, BOARD_Z_SAFE, 1000);
+
     _go(x, y, BOARD_Z_DOWN,   800);    /* 下降 */
     arm_magnet_off();
     arm_delay_ms(300);                  /* 等待释放 */
@@ -90,6 +111,8 @@ void Chess_PlaceAt(float x, float y)
 
 void Chess_MoveToSafe(void)
 {
+    /* 回安全位也走过渡点：先收缩再移到安全位 */
+    _go(WAYPOINT_X, WAYPOINT_Y, BOARD_Z_CRUISE, 800);
     _go(100.0f, 30.0f, BOARD_Z_SAFE, 1200);
 }
 

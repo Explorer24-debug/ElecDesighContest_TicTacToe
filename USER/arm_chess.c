@@ -34,6 +34,19 @@ static void _move_and_wait(float x, float y, float z, uint32_t time_ms)
 }
 
 /* ================================================================== */
+/*  内部：经过过渡点移动（收缩手臂避开摄像头后前往目标）                   */
+/* ================================================================== */
+static void _move_via(float x, float y, float z, uint32_t t_ms)
+{
+    /* 先到过渡点：收缩 + 低头 */
+    _move_and_wait(WAYPOINT_X, WAYPOINT_Y, BOARD_Z_CRUISE, 800);
+    /* 巡航高度平移到目标上方 */
+    _move_and_wait(x, y, BOARD_Z_CRUISE, 1000);
+    /* 上升到目标高度 */
+    _move_and_wait(x, y, z, 600);
+}
+
+/* ================================================================== */
 /*  初始化                                                              */
 /* ================================================================== */
 void arm_chess_init(void)
@@ -61,8 +74,8 @@ void arm_chess_do_move(uint8_t pos)
 
     /* ---- 步骤 1：从备用棋位置取子 ---- */
 
-    /* 1a. 悬停在备用棋上方 */
-    _move_and_wait(STOCK_X, STOCK_Y, BOARD_Z_SAFE, 1000);
+    /* 1a. 去备用棋上方（走过渡点） */
+    _move_via(STOCK_X, STOCK_Y, BOARD_Z_SAFE, 1000);
 
     /* 1b. 下降到取子高度 */
     _move_and_wait(STOCK_X, STOCK_Y, BOARD_Z_PICKUP, 800);
@@ -76,8 +89,8 @@ void arm_chess_do_move(uint8_t pos)
 
     /* ---- 步骤 2：移动到目标格放子 ---- */
 
-    /* 2a. 悬停在目标格上方 */
-    _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
+    /* 2a. 去目标格上方（走过渡点） */
+    _move_via(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
 
     /* 2b. 下降到放子高度 */
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_DOWN, 800);
@@ -100,15 +113,15 @@ void arm_chess_place(uint8_t pos)
 {
     if (pos < 1 || pos > 9) return;
 
-    /* 取子 */
-    _move_and_wait(STOCK_X, STOCK_Y, BOARD_Z_SAFE, 1000);
+    /* 取子（走过渡点） */
+    _move_via(STOCK_X, STOCK_Y, BOARD_Z_SAFE, 1000);
     _move_and_wait(STOCK_X, STOCK_Y, BOARD_Z_PICKUP, 800);
     arm_magnet_on();
     arm_delay_ms(300);
     _move_and_wait(STOCK_X, STOCK_Y, BOARD_Z_SAFE, 800);
 
-    /* 放子 */
-    _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
+    /* 放子（走过渡点） */
+    _move_via(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_DOWN, 800);
     arm_magnet_off();
     arm_delay_ms(300);
@@ -124,8 +137,8 @@ void arm_chess_remove(uint8_t pos)
 {
     if (pos < 1 || pos > 9) return;
 
-    /* 移到目标格上方 */
-    _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
+    /* 移到目标格上方（走过渡点） */
+    _move_via(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 1000);
 
     /* 下降吸住 */
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_DOWN, 800);
@@ -135,8 +148,8 @@ void arm_chess_remove(uint8_t pos)
     /* 抬起 */
     _move_and_wait(s_grid[pos].x, s_grid[pos].y, BOARD_Z_SAFE, 800);
 
-    /* 移到丢弃区域 */
-    _move_and_wait(STOCK_X, STOCK_Y - 30.0f, BOARD_Z_SAFE, 1000);
+    /* 移到丢弃区域（走过渡点） */
+    _move_via(STOCK_X, STOCK_Y - 30.0f, BOARD_Z_SAFE, 1000);
     _move_and_wait(STOCK_X, STOCK_Y - 30.0f, BOARD_Z_DOWN, 800);
     arm_magnet_off();
     arm_delay_ms(300);
@@ -150,5 +163,7 @@ void arm_chess_remove(uint8_t pos)
 /* ================================================================== */
 void arm_chess_to_safe(void)
 {
+    /* 先回过渡点收缩，再去安全位 */
+    _move_and_wait(WAYPOINT_X, WAYPOINT_Y, BOARD_Z_CRUISE, 800);
     _move_and_wait(100.0f, 30.0f, BOARD_Z_SAFE, 1200);
 }

@@ -275,6 +275,9 @@ void Decision_Init(void)
 
     Arm_MoveToSafe();
     g_sys_state = SYS_STATE_SELECT;
+
+    printf("=== WeArm Chess System Ready ===\r\n");
+    printf("Human first by default. Press KEY1 for machine first.\r\n");
 }
 
 /* ================================================================== */
@@ -311,37 +314,37 @@ void Decision_Update(void)
         wait_counter = 0;
         break;
 
-    /* ---- 先后手选择（队友原版逻辑） ---- */
+    /* ---- 先后手选择 ---- */
     case SYS_STATE_SELECT:
         if (wait_counter == 0) {
-            /* 提示信息——无串口版本用延时代替 */
+            printf("STATE: SELECT - Waiting for KEY1(machine first) or timeout(human first)\r\n");
         }
         arm_delay_ms(100);
         wait_counter++;
         if (wait_counter >= 30) {    /* 3 秒超时，默认人先手 */
             g_human_first = 1;
             g_sys_state   = SYS_STATE_WAIT_HUMAN;
+            printf("STATE: SELECT -> WAIT_HUMAN (timeout, human first)\r\n");
         }
         break;
 
-    /* ---- 等待人落子（队友原版：按 KEY2 触发拍照） ---- */
+    /* ---- 等待人落子 ---- */
     case SYS_STATE_WAIT_HUMAN:
-        /*
-         * 此处调用视觉层的拍照请求函数。
-         * 视觉层（comm_layer）由队友负责，当人按下确认键后，
-         * 外部代码调用 Comm_Send_RequestCapture()，
-         * 这里保持与队友版完全一致的状态切换。
-         *
-         * ---- 注意：此 case 的实际触发逻辑在 main.c 的按键检测中 ----
-         * 见 main.c 的说明，KEY2 检测在 main 循环里完成后切换状态。
-         */
+        /* 等人按 KEY2 触发拍照，状态切换在 main.c 的按键检测中完成 */
         break;
 
-    /* ---- 等待视觉返回（队友原版逻辑，C89 修复） ---- */
+    /* ---- 等待视觉返回 ---- */
     case SYS_STATE_WAIT_VISION:
         if (g_vision_data_ready) {
             g_vision_data_ready = 0;
             g_waiting_vision    = 0;
+
+            /* 打印视觉传回的棋盘状态 */
+            printf("VISION Board: ");
+            for (i = 0; i < 3; i++)
+                for (j = 0; j < 3; j++)
+                    printf("%d", g_board_real[i][j]);
+            printf(" | Angle: %.1f deg\r\n", g_board_angle_deg);
 
             /* 检查棋盘是否被篡改 */
             cheat_detected = 0;
@@ -354,6 +357,7 @@ void Decision_Update(void)
                 }
             }
             if (cheat_detected) {
+                printf("STATE: WAIT_VISION -> HUIFU (board mismatch detected!)\r\n");
                 g_sys_state = SYS_STATE_HUIFU;
                 break;
             }
@@ -362,32 +366,39 @@ void Decision_Update(void)
             if (g_new_human_move != 0) {
                 PosToIndex(g_new_human_move, &r, &c);
                 if (g_board[r][c] != SPACE_EMPTY) {
+                    printf("STATE: WAIT_VISION -> WAIT_HUMAN (pos %d occupied, ignore)\r\n", g_new_human_move);
                     g_new_human_move = 0;
                     g_sys_state = SYS_STATE_WAIT_HUMAN;
                     break;
                 }
                 g_board[r][c]    = SPACE_BLACK;
                 g_new_human_move = 0;
+                printf("STATE: Human move -> pos %d (row%d,col%d)\r\n", r*3+c+1, r+1, c+1);
 
                 if (CheckWin(SPACE_BLACK)) {
+                    printf("STATE: WAIT_VISION -> GAME_OVER (BLACK WINS!)\r\n");
                     g_sys_state = SYS_STATE_GAME_OVER;
                 } else if (CheckDraw()) {
+                    printf("STATE: WAIT_VISION -> GAME_OVER (DRAW!)\r\n");
                     g_sys_state = SYS_STATE_GAME_OVER;
                 } else {
+                    printf("STATE: WAIT_VISION -> CALCULATE (machine thinking...)\r\n");
                     g_sys_state = SYS_STATE_CALCULATE;
                 }
             } else {
+                printf("STATE: WAIT_VISION -> WAIT_HUMAN (no new move detected)\r\n");
                 g_sys_state = SYS_STATE_WAIT_HUMAN;
             }
         }
 
-        /* 超时处理（队友原版） */
+        /* 超时处理 */
         if (g_waiting_vision) {
             arm_delay_ms(100);
             vision_timeout++;
             if (vision_timeout > 300) {
                 vision_timeout   = 0;
                 g_waiting_vision = 0;
+                printf("STATE: WAIT_VISION timeout -> WAIT_HUMAN\r\n");
                 g_sys_state      = SYS_STATE_WAIT_HUMAN;
             }
         } else {
@@ -395,7 +406,7 @@ void Decision_Update(void)
         }
         break;
 
-    /* ---- 棋盘恢复（队友原版逻辑，C89 修复） ---- */
+    /* ---- 棋盘恢复（作弊处理） ---- */
     case SYS_STATE_HUIFU:
         restore_done = 1;
         for (i = 0; i < 3; i++) {
@@ -408,6 +419,8 @@ void Decision_Update(void)
                 if (g_board_real[i][j] != SPACE_EMPTY &&
                     g_board[i][j]      == SPACE_EMPTY) {
 
+                    printf("HUIFU: pos %d remove extra piece (%s)\r\n", pos,
+                           (g_board_real[i][j] == SPACE_BLACK) ? "BLACK" : "WHITE");
                     actual = TransformPoint(GRID_POINT[pos]);
                     Arm_Do_Grab(actual.x, actual.y);
 
@@ -425,6 +438,8 @@ void Decision_Update(void)
                 if (g_board_real[i][j] == SPACE_EMPTY &&
                     g_board[i][j]      != SPACE_EMPTY) {
 
+                    printf("HUIFU: pos %d restore missing piece (%s)\r\n", pos,
+                           (g_board[i][j] == SPACE_BLACK) ? "BLACK" : "WHITE");
                     Chess_RestorePiece(pos,
                         (g_board[i][j] == SPACE_WHITE) ? 1 : 0);
                     g_board_real[i][j] = g_board[i][j];
@@ -437,6 +452,9 @@ void Decision_Update(void)
                     g_board[i][j]      != SPACE_EMPTY &&
                     g_board_real[i][j] != g_board[i][j]) {
 
+                    printf("HUIFU: pos %d swap wrong piece (%s->%s)\r\n", pos,
+                           (g_board_real[i][j] == SPACE_BLACK) ? "BLACK" : "WHITE",
+                           (g_board[i][j] == SPACE_BLACK) ? "BLACK" : "WHITE");
                     /* 先拿走错误棋子 */
                     actual = TransformPoint(GRID_POINT[pos]);
                     Arm_Do_Grab(actual.x, actual.y);
@@ -458,40 +476,49 @@ void Decision_Update(void)
         }
 
         if (restore_done) {
+            printf("STATE: HUIFU done -> WAIT_HUMAN\r\n");
             Chess_MoveToSafe();
             g_sys_state = SYS_STATE_WAIT_HUMAN;
         }
         break;
 
-    /* ---- 机器思考 + 落子（队友原版逻辑，接入 arm_chess_ex） ---- */
+    /* ---- 机器思考 + 落子 ---- */
     case SYS_STATE_CALCULATE:
         arm_delay_ms(500);
 
         best_grid = Logic_GetBestMove();
         if (best_grid == 0) {
+            printf("STATE: CALCULATE -> GAME_OVER (board full)\r\n");
             g_sys_state = SYS_STATE_GAME_OVER;
             break;
         }
 
         PosToIndex(best_grid, &r, &c);
         g_board[r][c] = SPACE_WHITE;
+        printf("STATE: Machine move -> pos %d (row%d,col%d)\r\n", best_grid, r+1, c+1);
 
         /* 去白棋区取棋 */
         target = WAIT_WHITE_POINT[g_white_pawn_index];
+        printf("ARM: Grab white pawn from stock #%d\r\n", g_white_pawn_index);
         Arm_Do_Grab(target.x, target.y);
         if (g_white_pawn_index < 4) g_white_pawn_index++;
 
         /* 放到目标格（应用旋转变换） */
         actual = TransformPoint(GRID_POINT[best_grid]);
+        printf("ARM: Place at grid %d (x=%.1f, y=%.1f, angle=%.1f)\r\n",
+               best_grid, actual.x, actual.y, g_board_angle_deg);
         Arm_Do_Place(actual.x, actual.y);
 
         Chess_MoveToSafe();
 
         if (CheckWin(SPACE_WHITE)) {
+            printf("STATE: CALCULATE -> GAME_OVER (WHITE WINS!)\r\n");
             g_sys_state = SYS_STATE_GAME_OVER;
         } else if (CheckDraw()) {
+            printf("STATE: CALCULATE -> GAME_OVER (DRAW!)\r\n");
             g_sys_state = SYS_STATE_GAME_OVER;
         } else {
+            printf("STATE: CALCULATE -> WAIT_HUMAN\r\n");
             g_sys_state = SYS_STATE_WAIT_HUMAN;
         }
         break;
@@ -502,6 +529,11 @@ void Decision_Update(void)
 
     /* ---- 游戏结束 ---- */
     case SYS_STATE_GAME_OVER:
+        printf("STATE: GAME_OVER! Final board: ");
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++)
+                printf("%d", g_board[i][j]);
+        printf("\r\n");
         arm_magnet_off();
         arm_delay_ms(100);
         break;
